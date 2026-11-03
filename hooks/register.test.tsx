@@ -10,7 +10,7 @@ const decode = (b64: string) => {
   return new Uint32Array(bytes.buffer)
 }
 
-test('mpv frames reach the pane as Raster cells', { options: { columns: 8, rows: 3 } }, async ($, on) => {
+test('mpv frames reach the band above the prompt as Raster cells', { options: { columns: 8, rows: 3 } }, async ($, on) => {
   const clock = mock.clock(on)
   mock.env(on, { HOME: '/home/me' })
   const blits: string[] = []
@@ -18,6 +18,11 @@ test('mpv frames reach the pane as Raster cells', { options: { columns: 8, rows:
   let argv: readonly string[] = []
   let flags = ''
   on('command.register', () => ({ value: { command: 'anime' } }))
+  // What else draws in the band, as context-meter does.
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>context band</Text>
+  })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.status', () => ({ value: undefined }))
@@ -39,6 +44,8 @@ test('mpv frames reach the pane as Raster cells', { options: { columns: 8, rows:
     yield { stream: 'stdout' as const, text: TCT.slice(1001) }
     // The first row of a next frame closes the second.
     yield { stream: 'stdout' as const, text: '\x1b[0;0f' }
+    // The episode plays on until the test moves the clock.
+    await clock.sleep(1_000)
     return { value: { code: 0, signal: null } }
   })
 
@@ -66,4 +73,28 @@ test('mpv frames reach the pane as Raster cells', { options: { columns: 8, rows:
   // And back: the half blocks come back from the kept pixels.
   await $.command.run({ command: 'anime', args: 'mode blocks', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
   expect(decode(blits.at(-1)!)[2]).toBe(0x120000)
+
+  // Above the prompt, the picture sits over what else draws in the band.
+  const band = await $.ui.mount({
+    plugin: 'anime-break',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: true, maxRows: 30, bodyColumns: 80, scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  })
+  expect(await band.find({ type: 'Raster' })).toBeDefined()
+  expect((await band.find({ type: 'Text', text: /one piece/ }))?.text).toContain('playing')
+  expect((await band.find({ type: 'Text', text: /context band/ }))?.text).toBe('context band')
+  await band.unmount()
+
+  // Once the episode ends the band is the others' alone.
+  await clock.advance(1_000)
+  const after = await $.ui.mount({
+    plugin: 'anime-break',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 30, bodyColumns: 80, scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  })
+  expect(await after.find({ type: 'Raster' })).toBeUndefined()
+  expect((await after.find({ type: 'Text' }))?.text).toBe('context band')
+  await after.unmount()
 })

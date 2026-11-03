@@ -1,8 +1,8 @@
 # anime-break
 
-A Claude Code mod that plays anime in a pane beside the chat while the model works: the episode plays during each turn and pauses when the turn ends, so the pause tells you the answer is ready.
+A Claude Code mod that plays anime in the terminal, above the prompt or in a side pane, while the model works: the episode plays during each turn and pauses when the turn ends, so the pause tells you the answer is ready.
 
-[ani-cli](https://github.com/pystardust/ani-cli) finds the episode and its stream; mpv decodes it and draws each frame as terminal cells (`--vo=tct`), which the mod paints into the pane. The sound plays as usual, in step with the picture.
+[ani-cli](https://github.com/pystardust/ani-cli) finds the episode and its stream; mpv decodes it and draws each frame as terminal cells (`--vo=tct`), which the mod paints into Claude Code's own window. The sound plays as usual, in step with the picture.
 
 ## Requirements
 
@@ -32,13 +32,11 @@ From a shell:
 claude plugin install anime-break --marketplace likeamahoney/anime-break
 ```
 
-This repository is private: it installs only for people who can read it on GitHub and whose machine already holds a git credential for github.com (an SSH key, or `gh auth login` then `gh auth setup-git`). The install never prompts for one.
-
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `/anime <query>` | Plays episode 1 of the first match in the pane |
+| `/anime <query>` | Plays episode 1 of the first match |
 | `/anime -S 2 -e 5 <query>` | The second match, episode 5 (ani-cli's options) |
 | `/anime search <query>` | Lists the matches |
 | `/anime episodes -S 2 <query>` | Lists the episodes of the second match |
@@ -47,10 +45,16 @@ This repository is private: it installs only for people who can read it on GitHu
 | `/anime mode blocks` | Coloured half blocks, two pixels a cell (the default) |
 | `/anime mode ascii` | ASCII characters by brightness |
 | `/anime mode color` | ASCII characters in each cell's colour |
+| `/anime window` | Draws above the prompt, as tall as the picture (the default) |
+| `/anime pane` | Draws in the side pane, the picture grown to fill it |
 | `/anime status` | Phase, last lines of ani-cli, and mpv's buffer and download speed |
 | `/anime stop` | Closes the player |
 
-`/config` holds the picture's size (64 x 18 cells), frame rate (12), the stream's quality (`worst`) and the default drawing mode.
+`/config` holds the picture's size above the prompt (at most 64 x 18 cells), frame rate (12), the stream's quality (`worst`), the default drawing mode and where it is drawn.
+
+## Where the picture goes
+
+Above the prompt the band is at most half the screen, so the picture shrinks to fit it whole, with its caption, at 16:9; whatever else draws in the band (another mod's) stays below it. The side pane is as tall as the screen and up to 45% of its width: `/anime pane` grows the picture to fill that width, up to 160 columns. Switching between the two resizes the picture while the episode plays on: mpv takes the new size when its video output is switched off and on, and the sound does not stop. A larger picture is more data a second; lower the frame rate in `/config` if it stutters.
 
 ## When it stutters
 

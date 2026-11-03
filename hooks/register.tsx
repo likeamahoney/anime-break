@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
 import type { Info } from '../types'
 
@@ -84,11 +84,15 @@ const HELP = [
   '/anime mode ascii       draw with ASCII characters',
   '/anime mode color       draw with ASCII characters in colour',
   '/anime status           what the player is doing, and its last lines',
+  '/anime window | pane    draw above the prompt, as tall as the picture, or in the side pane',
   '/anime stop             close the player',
 ].join('\n')
 
 // The picture and the player live in the module: a reload starts them over.
-const cfg = { columns: 64, rows: 18, fps: 12, quality: 'worst', mode: 'blocks' as Mode }
+const PLACES = ['window', 'pane'] as const
+type Place = (typeof PLACES)[number]
+// window: a band above the prompt, as tall as the picture; pane: the side dock.
+const cfg = { columns: 64, rows: 18, fps: 12, quality: 'worst', mode: 'blocks' as Mode, place: 'window' as Place }
 const live = {
   frame: blankFrame(cfg.columns * cfg.rows),
   // Each cell's two pixels as mpv sent them, upper then lower, so a change of
@@ -100,6 +104,14 @@ const live = {
   waiting: null as string | null,
   player: null as AsyncGenerator<unknown, unknown> | null,
   socket: '',
+  // The site the picture is drawn in: the pane's id, or the band's instance.
+  site: PANE,
+  // The size this episode is drawn at: cfg's, or less where the band is short.
+  size: { columns: cfg.columns, rows: cfg.rows },
+  // What the band above the prompt last offered, in rows and columns.
+  room: { rows: 0, columns: 0 },
+  // What the side pane last offered.
+  paneRoom: { rows: 0, columns: 0 },
 }
 
 const glyph = (upper: number, lower: number): [number, number, number] => {
@@ -120,7 +132,7 @@ const drawCell = (index: number, upper: number, lower: number) => {
 }
 
 const redraw = ($: EngineInterface) => {
-  for (let i = 0; i < cfg.columns * cfg.rows; i += 1) {
+  for (let i = 0; i < live.size.columns * live.size.rows; i += 1) {
     if (live.drawn[i] === 1) drawCell(i, live.pixels[i * 2]!, live.pixels[i * 2 + 1]!)
   }
   paint($, base64(new Uint8Array(live.frame.buffer)))
@@ -204,7 +216,7 @@ const paint = ($: EngineInterface, cells: string) => {
       let next: string | null = cells
       while (next !== null) {
         live.waiting = null
-        await $.ui.blit({ requestId: PANE, key: SCREEN, cells: next })
+        await $.ui.blit({ requestId: live.site, key: SCREEN, cells: next })
         next = live.waiting
       }
     })().finally(() => {
@@ -317,6 +329,53 @@ const stop = async ($: EngineInterface) => {
   await running?.return(undefined)
 }
 
+const resetFrame = () => {
+  const cells = live.size.columns * live.size.rows
+  live.frame = blankFrame(cells)
+  live.pixels = new Uint32Array(cells * 2)
+  live.drawn = new Uint8Array(cells)
+}
+
+// The picture fills what its site offers, less a row for the caption, at
+// 16:9 (a cell is two pixels tall). Above the prompt, where the band is at
+// most half the screen, cfg's size is the most; the side pane grows past it.
+const PANE_MOST_COLUMNS = 160
+
+const fit = () => {
+  const isPane = cfg.place === 'pane'
+  const room = isPane ? live.paneRoom : live.room
+  if (room.rows === 0) return { columns: cfg.columns, rows: cfg.rows }
+  const mostColumns = Math.min(room.columns, isPane ? PANE_MOST_COLUMNS : cfg.columns)
+  let rows = Math.max(4, isPane ? room.rows - 2 : Math.min(cfg.rows, room.rows - 2))
+  let columns = Math.round((rows * 2 * 16) / 9)
+  if (columns > mostColumns) {
+    columns = mostColumns
+    rows = Math.max(4, Math.round((columns * 9) / 32))
+  }
+  return { columns: Math.max(8, columns), rows }
+}
+
+// mpv takes a new tct size only with a new video output: switching it off
+// and on again redraws the next frame at the new size, the episode playing on.
+const resize = async ($: EngineInterface) => {
+  const size = fit()
+  if (size.columns === live.size.columns && size.rows === live.size.rows) return
+  live.size = size
+  resetFrame()
+  paint($, base64(new Uint8Array(live.frame.buffer)))
+  await send($, ['set_property', 'options/vo-tct-width', size.columns])
+  await send($, ['set_property', 'options/vo-tct-height', size.rows])
+  await send($, ['set_property', 'vo', 'null'])
+  await send($, ['set_property', 'vo', 'tct'])
+  // The Raster's size changed: a write of the info draws it anew.
+  await setInfo($, {})
+}
+
+// A pane just opened has not been measured yet: wait for its first drawing.
+const waitForPane = async ($: EngineInterface) => {
+  for (let i = 0; i < 20 && live.paneRoom.rows === 0; i += 1) await $.clock.sleep(100)
+}
+
 const playStream = async ($: EngineInterface, args: string) => {
   await stop($)
   const home = (await $.env.get('HOME')) ?? '/tmp'
@@ -325,9 +384,8 @@ const playStream = async ($: EngineInterface, args: string) => {
   if (!words.includes('-S') && !words.includes('--select-nth')) words.unshift('-S', '1')
   if (!words.some(w => ['-e', '--episode', '-r', '--range'].includes(w))) words.unshift('-e', '1')
 
-  live.frame = blankFrame(cfg.columns * cfg.rows)
-  live.pixels = new Uint32Array(cfg.columns * cfg.rows * 2)
-  live.drawn = new Uint8Array(cfg.columns * cfg.rows)
+  live.size = fit()
+  resetFrame()
   paint($, base64(new Uint8Array(live.frame.buffer)))
   await setInfo($, { title: titleOf(args.split(/\s+/).filter(Boolean)), phase: 'loading', log: [] })
   $.ui.status('anime: loading')
@@ -336,8 +394,8 @@ const playStream = async ($: EngineInterface, args: string) => {
     '--vo=tct',
     '--vo-tct-algo=half-blocks',
     '--vo-tct-256=no',
-    `--vo-tct-width=${cfg.columns}`,
-    `--vo-tct-height=${cfg.rows}`,
+    `--vo-tct-width=${live.size.columns}`,
+    `--vo-tct-height=${live.size.rows}`,
     `--vf=fps=${cfg.fps}`,
     '--really-quiet',
     '--no-input-terminal',
@@ -409,9 +467,9 @@ const playStream = async ($: EngineInterface, args: string) => {
       } else if (m[6] !== undefined) {
         fg = rgb(m[6], m[7], m[8])
       } else if (m[9] !== undefined) {
-        if (row < cfg.rows && col < cfg.columns) {
+        if (row < live.size.rows && col < live.size.columns) {
           // mpv's background is the upper pixel, its foreground the lower.
-          drawCell(row * cfg.columns + col, bg, fg)
+          drawCell(row * live.size.columns + col, bg, fg)
           isDirty = true
         }
         col += 1
@@ -462,22 +520,57 @@ const describe = (now: Info) =>
     ...now.log.map(line => `  ${line}`),
   ].join('\n')
 
+const openPane = ($: EngineInterface) =>
+  $.ui.open({ id: PANE, title: 'Anime', rows: cfg.rows + 4, columns: cfg.columns + 2 })
+
+// The picture, its caption and, while it loads or after it failed, what
+// ani-cli said: the same in the band and in the pane.
+const drawing = ($: EngineInterface, e: RenderInput<'AbovePrompt' | 'Pane'>, now: Info) => {
+  const { Box, Text } = $.ui.resolve(e)
+  const caption = (
+    <Text>
+      <Text bold>{now.title === '' ? 'anime' : now.title}</Text>
+      <Text dimColor> · {now.phase} · {cfg.mode} · /anime pause|play|mode|stop</Text>
+    </Text>
+  )
+  const log = (now.phase === 'loading' || now.phase === 'failed' ? now.log : []).map(line => (
+    <Text dimColor>{line}</Text>
+  ))
+  if (e.surface !== 'terminal') {
+    return (
+      <Box flexDirection="column">
+        {caption}
+        <Text dimColor>The picture is drawn in the terminal only.</Text>
+      </Box>
+    )
+  }
+  const { Raster } = $.ui.resolve(e)
+  return (
+    <Box flexDirection="column">
+      <Raster key={SCREEN} columns={live.size.columns} rows={live.size.rows} cells={live.shown} />
+      {caption}
+      {log}
+    </Box>
+  )
+}
+
 export const register: Register = (on, options) => {
   cfg.columns = Number(options.columns ?? 64)
   cfg.rows = Number(options.rows ?? 18)
   cfg.fps = Number(options.fps ?? 12)
   cfg.quality = String(options.quality ?? 'worst')
   cfg.mode = MODES.find(m => m === options.mode) ?? 'blocks'
-  live.pixels = new Uint32Array(cfg.columns * cfg.rows * 2)
-  live.drawn = new Uint8Array(cfg.columns * cfg.rows)
-  live.frame = blankFrame(cfg.columns * cfg.rows)
+  cfg.place = PLACES.find(m => m === options.place) ?? 'window'
+  live.site = PANE
+  live.size = { columns: cfg.columns, rows: cfg.rows }
+  resetFrame()
   live.shown = base64(new Uint8Array(live.frame.buffer))
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'anime',
       description: 'Watch anime in a pane while the model works: plays during turns, pauses between them',
-      argumentHint: '<query>|search <query>|status|episodes -S <n> <query>|pause|play|mode <blocks|ascii|color>|off|on|stop|help',
+      argumentHint: '<query>|search <query>|status|window|pane|episodes -S <n> <query>|pause|play|mode <blocks|ascii|color>|off|on|stop|help',
       immediate: true,
     })
     return next(e)
@@ -506,11 +599,27 @@ export const register: Register = (on, options) => {
       case 'play':
         return (await setPaused($, arg === 'pause'))
           ? { text: `anime: ${arg === 'pause' ? 'paused' : 'playing'}.` }
-          : { text: 'anime: nothing is playing; /anime <query> starts an episode.' }
+          : (await read($, info)).phase === 'loading'
+            ? { text: 'anime: still loading; it plays as soon as the first frame comes.' }
+            : { text: 'anime: nothing is playing; /anime <query> starts an episode.' }
       case 'off':
       case 'on':
         await update($, isFollowing, () => arg === 'on')
         return { text: arg === 'on' ? 'anime: follows the turns.' : 'anime: left alone.' }
+      case 'window':
+      case 'pane':
+        cfg.place = arg
+        if (arg === 'pane') {
+          await openPane($)
+          await waitForPane($)
+        } else {
+          await $.ui.close({ id: PANE })
+          live.paneRoom = { rows: 0, columns: 0 }
+        }
+        // Both sites read the info: a write draws the picture where it now goes.
+        await setInfo($, {})
+        await resize($)
+        return { text: `anime: drawn ${arg === 'pane' ? 'in the side pane' : 'above the prompt'}.` }
       case 'status':
         return { text: [describe(await read($, info)), ...(await health($))].join('\n') }
       case 'stop':
@@ -519,7 +628,10 @@ export const register: Register = (on, options) => {
         $.ui.status(undefined)
         return { text: 'anime: player closed.' }
     }
-    await $.ui.open({ id: PANE, title: 'Anime', rows: cfg.rows + 4, columns: cfg.columns + 2 })
+    if (cfg.place === 'pane') {
+      await openPane($)
+      await waitForPane($)
+    }
     // The player runs for the session's life, past this hook.
     detach($, play($, arg))
     return { text: `anime: looking for "${arg}"…` }
@@ -536,33 +648,26 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+  // Above the prompt, as tall as the picture, over whatever else draws there.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const now = await read($, info)
-    const caption = (
-      <Text>
-        <Text bold>{now.title === '' ? 'anime' : now.title}</Text>
-        <Text dimColor> · {now.phase} · {cfg.mode} · /anime pause|play|mode|stop</Text>
-      </Text>
-    )
-    const log = now.phase === 'loading' || now.phase === 'failed' ? now.log : []
-    if (e.surface !== 'terminal') {
-      return (
-        <Box flexDirection="column">
-          {caption}
-          <Text dimColor>The picture is drawn in the terminal only.</Text>
-        </Box>
-      )
-    }
-    const { Raster } = $.ui.resolve(e)
+    live.room = { rows: e.props.maxRows, columns: e.props.bodyColumns }
+    const isShown = now.phase !== 'idle' && now.phase !== 'ended'
+    if (cfg.place !== 'window' || !isShown || e.props.hasSurvey) return next(e)
+    live.site = e.requestId
+    const below = await next(e)
+    const { Box } = $.ui.resolve(e)
     return (
       <Box flexDirection="column">
-        <Raster key={SCREEN} columns={cfg.columns} rows={cfg.rows} cells={live.shown} />
-        {caption}
-        {log.map(line => (
-          <Text dimColor>{line}</Text>
-        ))}
+        {drawing($, e, now)}
+        {below}
       </Box>
     )
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    live.site = PANE
+    live.paneRoom = { rows: e.props.scroll.bodyRows, columns: e.props.bodyColumns }
+    return drawing($, e, await read($, info))
   })
 }
