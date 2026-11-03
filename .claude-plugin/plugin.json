@@ -1,0 +1,14 @@
+{
+  "name": "anime-break",
+  "version": "0.3.0",
+  "description": "Watch anime in a pane while the model works: ani-cli finds the episode, mpv draws it as terminal cells, plays during each turn and pauses when the turn ends",
+  "author": { "name": "Yan Churkin" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "columns": { "type": "number", "title": "Columns", "description": "Width of the picture in terminal cells", "default": 64 },
+    "rows": { "type": "number", "title": "Rows", "description": "Height of the picture in terminal rows (two pixels each)", "default": 18 },
+    "fps": { "type": "number", "title": "Frames per second", "description": "How often the picture is redrawn", "default": 12 },
+    "quality": { "type": "string", "title": "Quality", "description": "The stream ani-cli picks: worst, best or a height such as 480", "default": "worst" },
+    "mode": { "type": "string", "title": "Drawing", "description": "Coloured half blocks, ASCII, or ASCII in colour", "options": ["blocks", "ascii", "color"], "default": "blocks" }
+  }
+}

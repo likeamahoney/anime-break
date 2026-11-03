@@ -1,0 +1,12 @@
+{
+  "name": "anime-break",
+  "owner": { "name": "Yan Churkin" },
+  "description": "Watch anime in a Claude Code pane while the model works",
+  "plugins": [
+    {
+      "name": "anime-break",
+      "source": "./",
+      "description": "Watch anime in a pane while the model works: ani-cli finds the episode, mpv draws it as terminal cells, plays during each turn and pauses when the turn ends"
+    }
+  ]
+}
